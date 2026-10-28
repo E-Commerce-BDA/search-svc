@@ -238,3 +238,4 @@ ON CONFLICT (document_type, id) DO UPDATE SET
   synced_at = now();
 
 COMMIT;
+

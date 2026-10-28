@@ -52,3 +52,4 @@ CREATE INDEX IF NOT EXISTS idx_search_documents_category
   WHERE document_type = 'product';
 
 COMMIT;
+
