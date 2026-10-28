@@ -15,7 +15,12 @@ export class CacheControlInterceptor implements NestInterceptor {
     const response = ctx.getResponse<Response>();
 
     const mutatingMethods = ['POST', 'PATCH', 'PUT', 'DELETE'];
-    if (mutatingMethods.includes(request.method?.toUpperCase())) {
+    const isMutating = mutatingMethods.includes(request.method?.toUpperCase());
+    const isInternal = (request.path ?? request.url ?? '').includes(
+      '/internal/',
+    );
+
+    if (isMutating || isInternal) {
       response.setHeader('Cache-Control', 'no-store');
     }
 

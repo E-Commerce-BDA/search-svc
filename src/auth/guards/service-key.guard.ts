@@ -16,14 +16,20 @@ export class ServiceKeyGuard implements CanActivate {
     const serviceKey = request.headers['x-service-key'];
 
     if (!serviceKey) {
-      throw new UnauthorizedException('Missing x-service-key header');
+      throw new UnauthorizedException({
+        code: 'SERVICE_KEY_INVALID',
+        message: 'Missing x-service-key header',
+      });
     }
 
     const expectedKey =
       process.env.INTERNAL_SERVICE_KEY || DEFAULT_INTERNAL_SERVICE_KEY;
 
     if (serviceKey !== expectedKey) {
-      throw new UnauthorizedException('Invalid service key');
+      throw new UnauthorizedException({
+        code: 'SERVICE_KEY_INVALID',
+        message: 'Invalid service key',
+      });
     }
 
     return true;

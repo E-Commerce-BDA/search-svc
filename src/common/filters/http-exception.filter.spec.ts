@@ -143,4 +143,52 @@ describe('HttpExceptionFilter', () => {
     );
     expect(loggerSpy).toHaveBeenCalled();
   });
+
+  it('maps Express entity.too.large to 413 PAYLOAD_TOO_LARGE', () => {
+    const request = makeRequest({ method: 'POST' });
+    const response = makeResponse();
+
+    const error = Object.assign(new Error('request entity too large'), {
+      type: 'entity.too.large',
+      status: 413,
+      statusCode: 413,
+    });
+
+    filter.catch(error, makeHost(request, response));
+
+    expect(response.status).toHaveBeenCalledWith(413);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: {
+          code: 'PAYLOAD_TOO_LARGE',
+          message: 'Request payload exceeds 1MB limit',
+        },
+        requestId: 'req-test',
+      }),
+    );
+  });
+
+  it('maps Express entity.parse.failed to 400 VALIDATION_FAILED', () => {
+    const request = makeRequest({ method: 'POST' });
+    const response = makeResponse();
+
+    const error = Object.assign(new SyntaxError('Unexpected token in JSON'), {
+      type: 'entity.parse.failed',
+      status: 400,
+      statusCode: 400,
+    });
+
+    filter.catch(error, makeHost(request, response));
+
+    expect(response.status).toHaveBeenCalledWith(400);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: {
+          code: 'VALIDATION_FAILED',
+          message: 'Invalid JSON payload',
+        },
+        requestId: 'req-test',
+      }),
+    );
+  });
 });

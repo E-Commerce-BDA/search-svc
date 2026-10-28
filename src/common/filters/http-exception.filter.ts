@@ -41,10 +41,33 @@ export class HttpExceptionFilter implements ExceptionFilter {
       return;
     }
 
-    const status =
+    let status =
       exception instanceof HttpException
         ? exception.getStatus()
         : HttpStatus.INTERNAL_SERVER_ERROR;
+
+    if (!(exception instanceof HttpException) && isRecord(exception)) {
+      const errType = typeof exception.type === 'string' ? exception.type : '';
+      const errStatus =
+        typeof exception.status === 'number'
+          ? exception.status
+          : typeof exception.statusCode === 'number'
+            ? exception.statusCode
+            : undefined;
+
+      if (
+        errType === 'entity.too.large' ||
+        errStatus === HttpStatus.PAYLOAD_TOO_LARGE
+      ) {
+        status = HttpStatus.PAYLOAD_TOO_LARGE;
+      } else if (
+        errType === 'entity.parse.failed' ||
+        errStatus === HttpStatus.BAD_REQUEST
+      ) {
+        status = HttpStatus.BAD_REQUEST;
+      }
+    }
+
     const normalized = normalizeException(exception, status);
 
     if (status >= HttpStatus.INTERNAL_SERVER_ERROR) {
@@ -103,6 +126,28 @@ function normalizeException(
   const fallbackCode = defaultCode(status);
 
   if (!(exception instanceof HttpException)) {
+    if (isRecord(exception)) {
+      const errType = typeof exception.type === 'string' ? exception.type : '';
+      if (
+        errType === 'entity.too.large' ||
+        status === HttpStatus.PAYLOAD_TOO_LARGE
+      ) {
+        return {
+          code: 'PAYLOAD_TOO_LARGE',
+          message: 'Request payload exceeds 1MB limit',
+        };
+      }
+      if (
+        errType === 'entity.parse.failed' ||
+        status === HttpStatus.BAD_REQUEST
+      ) {
+        return {
+          code: 'VALIDATION_FAILED',
+          message: 'Invalid JSON payload',
+        };
+      }
+    }
+
     return {
       code: fallbackCode,
       message:
@@ -177,6 +222,8 @@ function defaultCode(status: number): string {
       return 'CONFLICT';
     case HttpStatus.TOO_MANY_REQUESTS:
       return 'RATE_LIMITED';
+    case HttpStatus.PAYLOAD_TOO_LARGE:
+      return 'PAYLOAD_TOO_LARGE';
     case HttpStatus.SERVICE_UNAVAILABLE:
       return 'SERVICE_UNAVAILABLE';
     default:

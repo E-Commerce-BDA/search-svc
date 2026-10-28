@@ -39,4 +39,21 @@ describe('CacheControlInterceptor', () => {
 
     expect(setHeader).not.toHaveBeenCalled();
   });
+
+  it('sets no-store for GET /api/v1/search/internal/stats', () => {
+    const setHeader = vi.fn();
+    const context = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          method: 'GET',
+          path: '/api/v1/search/internal/stats',
+        }),
+        getResponse: () => ({ setHeader }),
+      }),
+    } as unknown as ExecutionContext;
+
+    interceptor.intercept(context, next);
+
+    expect(setHeader).toHaveBeenCalledWith('Cache-Control', 'no-store');
+  });
 });

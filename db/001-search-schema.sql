@@ -6,7 +6,7 @@ CREATE SCHEMA IF NOT EXISTS search;
 -- Denormalized, eventually consistent read model indexed from Kafka events (product, category, blog).
 -- search_vector is automatically maintained via PostgreSQL GENERATED ALWAYS AS ... STORED.
 CREATE TABLE IF NOT EXISTS search.search_documents (
-  id uuid NOT NULL,
+  id varchar(64) NOT NULL,
   document_type varchar(20) NOT NULL,
   title varchar(255) NOT NULL,
   slug varchar(280) NOT NULL,

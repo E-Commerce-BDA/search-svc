@@ -25,14 +25,22 @@ describe('ServiceKeyGuard', () => {
 
   it('throws when x-service-key is missing', () => {
     expect(() => guard.canActivate(createMockContext({}))).toThrow(
-      new UnauthorizedException('Missing x-service-key header'),
+      new UnauthorizedException({
+        code: 'SERVICE_KEY_INVALID',
+        message: 'Missing x-service-key header',
+      }),
     );
   });
 
   it('throws when x-service-key does not match the default key', () => {
     expect(() =>
       guard.canActivate(createMockContext({ 'x-service-key': 'wrong-key' })),
-    ).toThrow(new UnauthorizedException('Invalid service key'));
+    ).toThrow(
+      new UnauthorizedException({
+        code: 'SERVICE_KEY_INVALID',
+        message: 'Invalid service key',
+      }),
+    );
   });
 
   it('allows the default key', () => {

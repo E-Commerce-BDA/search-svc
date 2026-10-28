@@ -58,6 +58,10 @@ describe('Search Schema (e2e)', () => {
         'synced_at',
       ]);
 
+      const idCol = result.rows.find((col) => col.column_name === 'id');
+      expect(idCol).toBeDefined();
+      expect(idCol?.data_type).toBe('character varying');
+
       const vectorCol = result.rows.find(
         (col) => col.column_name === 'search_vector',
       );
@@ -235,6 +239,27 @@ describe('Search Schema (e2e)', () => {
         expect(caughtError?.constraint).toBe(
           'chk_search_documents_effective_price',
         );
+      });
+    });
+
+    it('accepts MongoDB 24-hex ObjectId strings as valid document id', async () => {
+      await withRollback(async () => {
+        const mongoId = '507f1f77bcf86cd799439099';
+        await client.query(
+          `INSERT INTO search.search_documents (
+             id, document_type, title, slug, content, status, source_updated_at
+           ) VALUES (
+             $1, 'blog', 'Mongo Blog Post', 'mongo-blog-post',
+             'Testing mongo objectId insertion', 'active', now()
+           )`,
+          [mongoId],
+        );
+
+        const check = await client.query<{ id: string }>(
+          `SELECT id FROM search.search_documents WHERE id = $1`,
+          [mongoId],
+        );
+        expect(check.rows[0]?.id).toBe(mongoId);
       });
     });
   });
