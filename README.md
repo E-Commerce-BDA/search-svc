@@ -2,10 +2,9 @@
 
 Unified search service for the E-Commerce platform.
 
-Slice 1 is the foundation only: NestJS bootstrap, PostgreSQL pool, Redis
-service, health probes, shared HTTP behavior, and the internal service-key
-guard. Search indexing, suggest, full search, and the Kafka consumer start in
-later slices.
+Slice 2 provides the PostgreSQL schema, running-shoe seed dataset, row
+types, and SQL application scripts. Search indexing, suggest, full search, and
+the Kafka consumer start in later slices.
 
 ## Local setup
 
@@ -13,14 +12,14 @@ Prerequisites:
 
 - Node 24
 - pnpm 11
-- PostgreSQL on `localhost:5433` (database `ecom`, schema `search` in later
-  slices)
+- PostgreSQL on `localhost:5433` (database `ecom`, schema `search`)
 - Redis on `redis://localhost:6379`
 - Apache Kafka on `localhost:9092` (degraded dependency for readiness)
 
 ```bash
 pnpm install --ignore-workspace
 Copy-Item .env.example .env
+pnpm db:setup
 pnpm start:dev
 ```
 
