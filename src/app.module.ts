@@ -8,6 +8,7 @@ import { CommonModule } from './common/common.module.js';
 import { AuthModule } from './auth/auth.module.js';
 import { IndexerModule } from './indexer/indexer.module.js';
 import { EventsModule } from './events/events.module.js';
+import { SearchModule } from './search/search.module.js';
 
 @Module({
   imports: [
@@ -25,6 +26,7 @@ import { EventsModule } from './events/events.module.js';
     AuthModule,
     IndexerModule,
     EventsModule,
+    SearchModule,
   ],
 })
 export class AppModule {}
