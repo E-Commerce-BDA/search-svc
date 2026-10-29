@@ -1,6 +1,6 @@
 # search-svc
 
-Unified search service for the E-Commerce platform.
+Unified search service for the E-Commerce platform (:4090).
 
 Features:
 - Full-text search and prefix typeahead suggest across products, categories, and blogs.
@@ -8,6 +8,7 @@ Features:
 - Real-time event consumption from Apache Kafka (`product.updated`, `category.updated`, `blog.updated`, `product.imported`).
 - Internal batch-ingest and statistics API for backfill, disaster recovery replay, and hermetic testing.
 - Typeahead suggest cached in Redis (TTL 600s for default `limit=5`) with automatic corrupt cache eviction and PostgreSQL fallback.
+- Keyset cursor pagination for full search with query-bound SHA-256 fingerprinting and stable `totalHits`.
 
 ## Local setup
 
@@ -27,6 +28,21 @@ pnpm start:dev
 
 The service listens on `http://127.0.0.1:4090`.
 
+### Database Schema & Seed Setup (Manual)
+
+To apply the schema and seed dataset manually via `psql`:
+
+```bash
+# Development database
+psql -h localhost -p 5433 -U ecom -d ecom -f db/001-search-schema.sql
+psql -h localhost -p 5433 -U ecom -d ecom -f db/002-seed-search.sql
+
+# E2E test database
+psql -h localhost -p 5433 -U ecom -d postgres -c "CREATE DATABASE ecom_search_test;"
+psql -h localhost -p 5433 -U ecom -d ecom_search_test -f db/001-search-schema.sql
+psql -h localhost -p 5433 -U ecom -d ecom_search_test -f db/002-seed-search.sql
+```
+
 ## API Endpoints
 
 ### Public Endpoints
@@ -36,9 +52,21 @@ The service listens on `http://127.0.0.1:4090`.
   - Headers: `Cache-Control: public, max-age=60, stale-while-revalidate=300`.
   - Caching: Redis cache-aside (TTL 600s for `limit=5`).
   - Error codes:
-    - `400 QUERY_TOO_SHORT`: `q` is missing, empty, or less than 2 characters.
-    - `400 QUERY_INVALID`: `q` exceeds 100 characters or contains no searchable letters/digits after punctuation stripping.
-    - `400 INVALID_FILTER`: `limit` is not an integer between 1 and 10, or unexpected query parameters are passed.
+    - `400 QUERY_TOO_SHORT`: `q` missing or < 2 characters.
+    - `400 QUERY_INVALID`: `q` > 100 characters or punctuation-only.
+    - `400 INVALID_FILTER`: `limit` not an integer between 1 and 10, or unexpected parameters.
+
+- **`GET /api/v1/search?q=<string>&type=<enum>&category=<slug>&minPrice=<num>&maxPrice=<num>&sort=<enum>&cursor=<string>&limit=<1..50>`**
+  - Ranked full search with facet filtering and keyset cursor pagination.
+  - Headers: `Cache-Control: public, max-age=30, stale-while-revalidate=30`.
+  - Sort options: `relevance` (default), `price.asc`, `price.desc`, `newest`, `popular`.
+  - Keyset cursor: Base64url JSON envelope bound to the canonical query fingerprint (`q`, `type`, `category`, `minPrice`, `maxPrice`, `sort`).
+  - Error codes:
+    - `400 QUERY_TOO_SHORT`: `q` missing or < 2 characters.
+    - `400 QUERY_INVALID`: `q` > 100 characters or punctuation-only.
+    - `400 INVALID_FILTER`: invalid parameter, `minPrice > maxPrice`, price filters applied to non-products.
+    - `400 CURSOR_INVALID`: malformed cursor or query/filter mismatch.
+    - `503 SEARCH_UNAVAILABLE`: database connection failure.
 
 ### Internal Endpoints (requires `x-service-key`)
 
@@ -54,38 +82,48 @@ The service listens on `http://127.0.0.1:4090`.
 | --- | --- | --- |
 | `PORT` | `4090` | HTTP port |
 | `DATABASE_URL` | required | PostgreSQL connection string |
+| `DATABASE_TEST_URL` | — | Target database for E2E tests (`*_test`) |
 | `REDIS_URL` | `redis://localhost:6379` | Suggest cache; degraded dependency |
 | `KAFKA_BROKERS` | `localhost:9092` | Comma-separated broker list |
 | `INTERNAL_SERVICE_KEY` | dev default | `x-service-key` for `/internal/*` |
 
-E2E tests use `DATABASE_TEST_URL`, which must point at a `*_test` database:
+## Health Probes
 
-```sql
-CREATE DATABASE ecom_search_test;
-```
+- `GET /health` — liveness probe, returns `200 {"status":"ok"}`.
+- `GET /health/ready` — readiness probe. PostgreSQL is critical; Redis and Kafka are degraded dependencies:
+  - PostgreSQL down returns `503` with `status: "not_ready"`.
+  - Redis or Kafka down returns `200` with dependency marked `down`.
 
-## Health
+## Gateway Configuration (Nginx)
 
-- `GET /health` — liveness, no dependency calls.
-- `GET /health/ready` — readiness. PostgreSQL is critical; Redis and Kafka are
-  degraded.
+Example Nginx rate-limiting reverse proxy configuration:
 
-```json
-{
-  "status": "ready",
-  "checks": { "db": "up", "redis": "up", "kafka": "up" }
+```nginx
+limit_req_zone $binary_remote_addr zone=search_rate:10m rate=30r/s;
+
+upstream search_backend {
+    server 127.0.0.1:4090;
+    keepalive 32;
+}
+
+server {
+    listen 80;
+
+    location /api/v1/search/ {
+        limit_req zone=search_rate burst=50 nodelay;
+
+        proxy_pass http://search_backend;
+        proxy_http_version 1.1;
+        proxy_set_header Connection "";
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        proxy_set_header X-Request-ID $request_id;
+    }
 }
 ```
 
-PostgreSQL down returns `503` with `status: "not_ready"`. Redis or Kafka down
-still returns `200` with that dependency marked `down`.
-
-Health routes stay outside the `/api/v1` prefix.
-
 ## Docker
-
-The image expects PostgreSQL, Redis, and Kafka to be reachable from the
-container. On Docker Desktop, `host.docker.internal` reaches host services.
 
 ```bash
 docker build -t search-svc .
@@ -105,5 +143,3 @@ pnpm test
 pnpm test:e2e
 pnpm build
 ```
-
-The contracts dependency is packaged from `@ecom/contracts@1.2.0` tarball (`file:..\ecom-contracts\ecom-contracts-1.2.0.tgz`).
