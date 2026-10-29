@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [master, main]
+  pull_request:
+    branches: [master, main]
+
+jobs:
+  test:
+    name: Lint, Test & Build
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: ecom
+          POSTGRES_PASSWORD: ecom-dev-only
+          POSTGRES_DB: ecom
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 11.25.0
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Setup test database and apply schema
+        run: |
+          sudo apt-get update && sudo apt-get install -y postgresql-client
+          PGPASSWORD=ecom-dev-only psql -h localhost -p 5433 -U ecom -d postgres -c "CREATE DATABASE ecom_search_test;"
+          PGPASSWORD=ecom-dev-only psql -h localhost -p 5433 -U ecom -d ecom_search_test -f db/001-search-schema.sql
+          PGPASSWORD=ecom-dev-only psql -h localhost -p 5433 -U ecom -d ecom_search_test -f db/002-seed-search.sql
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Unit tests
+        run: pnpm test
+
+      - name: E2E tests
+        run: pnpm test:e2e
+        env:
+          DATABASE_TEST_URL: postgresql://ecom:ecom-dev-only@localhost:5433/ecom_search_test
+          REDIS_URL: redis://localhost:6379
+
+      - name: Build production bundle
+        run: pnpm build
