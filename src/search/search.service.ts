@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import {
   searchSuggestResponseSchema,
+  type SearchResponse,
+  type SearchResultItem,
   type SearchSuggestBlog,
   type SearchSuggestCategory,
   type SearchSuggestProduct,
@@ -9,6 +11,8 @@ import {
 import { RedisService } from '../redis/redis.service.js';
 import { SearchRepository } from './search.repository.js';
 import { normalizeQuery, toPrefixTsQuery } from './query-normalizer.js';
+import { encodeCursor } from './cursor.codec.js';
+import type { ValidatedSearchQuery } from './search.types.js';
 
 const SUGGEST_CACHE_TTL_SECONDS = 600;
 const DEFAULT_SUGGEST_LIMIT = 5;
@@ -22,7 +26,10 @@ export class SearchService {
     private readonly redisService: RedisService,
   ) {}
 
-  async suggest(rawQ: string, limit: number = DEFAULT_SUGGEST_LIMIT): Promise<SearchSuggestResponse> {
+  async suggest(
+    rawQ: string,
+    limit: number = DEFAULT_SUGGEST_LIMIT,
+  ): Promise<SearchSuggestResponse> {
     const normalizedQ = normalizeQuery(rawQ);
     const shouldCache = limit === DEFAULT_SUGGEST_LIMIT;
     const cacheKey = `search:suggest:${normalizedQ}`;
@@ -111,6 +118,52 @@ export class SearchService {
     }
 
     return response;
+  }
+
+  async search(query: ValidatedSearchQuery): Promise<SearchResponse> {
+    const { rows, totalHits } = await this.repository.search(query);
+
+    const hasMore = rows.length > query.limit;
+    const pageRows = hasMore ? rows.slice(0, query.limit) : rows;
+
+    let nextCursor: string | null = null;
+    if (hasMore && pageRows.length > 0) {
+      const last = pageRows[pageRows.length - 1];
+      nextCursor = encodeCursor({
+        v: 1,
+        q: query.fingerprint,
+        sort: query.sort,
+        id: last.id,
+        rank: last.rank,
+        popularity: last.popularity,
+        updatedAt: last.source_updated_at
+          ? last.source_updated_at.toISOString()
+          : undefined,
+        price: this.parseNumeric(last.price) ?? undefined,
+        total: totalHits,
+      });
+    }
+
+    const data: SearchResultItem[] = pageRows.map((r) => ({
+      id: r.id,
+      type: r.document_type,
+      title: r.title,
+      slug: r.slug,
+      image: r.image_url ?? undefined,
+      price: this.parseNumeric(r.price),
+      effectivePrice: this.parseNumeric(r.effective_price),
+      popularity: r.popularity,
+      updatedAt: r.source_updated_at
+        ? r.source_updated_at.toISOString()
+        : new Date().toISOString(),
+    }));
+
+    return {
+      query: query.q,
+      data,
+      nextCursor,
+      totalHits,
+    };
   }
 
   private parseNumeric(value: string | null | undefined): number | null {

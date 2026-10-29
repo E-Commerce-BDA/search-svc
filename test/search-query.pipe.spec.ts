@@ -1,5 +1,4 @@
 import { describe, expect, it } from 'vitest';
-import { BadRequestException } from '@nestjs/common';
 import { SearchQueryPipe } from '../src/search/search-query.pipe.js';
 import {
   computeQueryFingerprint,
