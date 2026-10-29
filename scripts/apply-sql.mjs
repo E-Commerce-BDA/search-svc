@@ -66,3 +66,4 @@ try {
   console.error('[apply-sql] Execution failed:', err);
   process.exit(1);
 }
+

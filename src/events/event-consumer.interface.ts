@@ -4,3 +4,4 @@ export interface IEventConsumer {
 }
 
 export const EVENT_CONSUMER = 'EVENT_CONSUMER';
+

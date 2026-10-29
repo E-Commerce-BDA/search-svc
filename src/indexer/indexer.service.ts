@@ -63,3 +63,4 @@ export class IndexerService {
     return this.repository.stats();
   }
 }
+

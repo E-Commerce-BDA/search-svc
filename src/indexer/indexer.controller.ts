@@ -38,3 +38,4 @@ export class IndexerController {
     return this.indexerService.stats();
   }
 }
+

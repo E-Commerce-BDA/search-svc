@@ -9,3 +9,4 @@ import { IndexerRepository } from './indexer.repository.js';
   exports: [IndexerService, IndexerRepository],
 })
 export class IndexerModule {}
+

@@ -31,3 +31,4 @@ import { InMemoryEventConsumer } from './in-memory-event-consumer.js';
   exports: [EVENT_CONSUMER, InMemoryEventConsumer, KafkaEventConsumer],
 })
 export class EventsModule {}
+

@@ -169,3 +169,4 @@ describe('EventMapper', () => {
     expect(EventMapper.mapToSearchDocument('invalid')).toBeNull();
   });
 });
+

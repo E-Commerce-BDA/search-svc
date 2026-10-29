@@ -20,3 +20,4 @@ export class InMemoryEventConsumer implements IEventConsumer {
     return this.indexerService.handleEvent(event);
   }
 }
+
