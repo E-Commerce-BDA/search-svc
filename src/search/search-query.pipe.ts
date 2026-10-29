@@ -19,8 +19,7 @@ import type { ValidatedSearchQuery } from './search.types.js';
 
 @Injectable()
 export class SearchQueryPipe
-  implements PipeTransform<unknown, ValidatedSearchQuery>
-{
+  implements PipeTransform<unknown, ValidatedSearchQuery> {
   transform(value: unknown): ValidatedSearchQuery {
     const parsed = searchQuerySchema.safeParse(value);
 
