@@ -14,8 +14,6 @@
     "start:dev": "nest start --watch",
     "start:debug": "nest start --debug --watch",
     "start:prod": "node dist/main.js",
-    "db:setup": "node scripts/apply-sql.mjs",
-    "db:setup:test": "node scripts/apply-sql.mjs --test",
     "lint": "oxlint --type-aware src/ test/",
     "test": "vitest run",
     "test:watch": "vitest",
