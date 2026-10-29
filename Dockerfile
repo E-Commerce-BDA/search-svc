@@ -9,12 +9,14 @@ RUN corepack enable
 FROM base AS deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
+COPY vendor ./vendor
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm install --frozen-lockfile --no-optional
 
 FROM base AS prod-deps
 WORKDIR /app
 COPY package.json pnpm-lock.yaml ./
+COPY vendor ./vendor
 RUN --mount=type=cache,id=pnpm-store,target=/pnpm/store \
   pnpm install --prod --frozen-lockfile --no-optional
 

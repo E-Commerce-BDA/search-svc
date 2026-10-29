@@ -9,8 +9,8 @@ importers:
   .:
     dependencies:
       '@ecom/contracts':
-        specifier: https://github.com/E-Commerce-BDA/ecom-contracts/releases/download/v1.1.0/ecom-contracts-1.1.0.tgz
-        version: https://github.com/E-Commerce-BDA/ecom-contracts/releases/download/v1.1.0/ecom-contracts-1.1.0.tgz(zod@4.6.7)
+        specifier: file:./vendor/ecom-contracts-1.2.0.tgz
+        version: file:vendor/ecom-contracts-1.2.0.tgz(zod@4.6.7)
       '@nestjs/common':
         specifier: ^12.0.1
         version: 12.3.2(class-transformer@0.5.1)(class-validator@0.15.1)(reflect-metadata@0.2.2)(rxjs@7.8.2)(supports-color@7.2.0)
@@ -158,9 +158,9 @@ packages:
     resolution: {integrity: sha512-ooWCrlZP11i8GImSjTHYHLkvFDP48nS4+204nGb1RiX/WXYHmJA2III9/e2DWVabCESdW7hBAEzHRqUn9OUVvQ==}
     engines: {node: '>=0.1.90'}
 
-  '@ecom/contracts@https://github.com/E-Commerce-BDA/ecom-contracts/releases/download/v1.1.0/ecom-contracts-1.1.0.tgz':
-    resolution: {integrity: sha512-UpMibZuQKFuvoqRaQSs6/nZUonFT2aP18pimhE6MYVueVQ2d8TJcs/4mF8LQcyKkgTnkICQPZO63irqnIV6AxQ==, tarball: https://github.com/E-Commerce-BDA/ecom-contracts/releases/download/v1.1.0/ecom-contracts-1.1.0.tgz}
-    version: 1.1.0
+  '@ecom/contracts@file:vendor/ecom-contracts-1.2.0.tgz':
+    resolution: {integrity: sha512-WqtWIXsJBYwQ4juP0C1DrfJHOoN8KcRu5fsmx/xm/796S2d7ha4afS0iF/AJICRMjvxOPuuDkiwuqT3hu6Ss9g==, tarball: file:vendor/ecom-contracts-1.2.0.tgz}
+    version: 1.2.0
     engines: {node: '>=22'}
     peerDependencies:
       zod: '>=4 <5'
@@ -1950,7 +1950,7 @@ snapshots:
   '@colors/colors@1.5.0':
     optional: true
 
-  '@ecom/contracts@https://github.com/E-Commerce-BDA/ecom-contracts/releases/download/v1.1.0/ecom-contracts-1.1.0.tgz(zod@4.6.7)':
+  '@ecom/contracts@file:vendor/ecom-contracts-1.2.0.tgz(zod@4.6.7)':
     dependencies:
       zod: 4.6.7
 
