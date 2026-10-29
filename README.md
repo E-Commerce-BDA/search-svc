@@ -2,9 +2,12 @@
 
 Unified search service for the E-Commerce platform.
 
-Slice 2 provides the PostgreSQL schema, running-shoe seed dataset, row
-types, and SQL application scripts. Search indexing, suggest, full search, and
-the Kafka consumer start in later slices.
+Features:
+- Full-text search and prefix typeahead suggest across products, categories, and blogs.
+- Denormalized read-model stored in PostgreSQL (`search.search_documents`) with GIN indexes on generated `search_vector`.
+- Real-time event consumption from Apache Kafka (`product.updated`, `category.updated`, `blog.updated`, `product.imported`).
+- Internal batch-ingest and statistics API for backfill, disaster recovery replay, and hermetic testing.
+- Typeahead suggest cached in Redis (TTL 600s for default `limit=5`) with automatic corrupt cache eviction and PostgreSQL fallback.
 
 ## Local setup
 
@@ -19,11 +22,31 @@ Prerequisites:
 ```bash
 pnpm install --ignore-workspace
 Copy-Item .env.example .env
-pnpm db:setup
 pnpm start:dev
 ```
 
 The service listens on `http://127.0.0.1:4090`.
+
+## API Endpoints
+
+### Public Endpoints
+
+- **`GET /api/v1/search/suggest?q=<string>&limit=<1..10>`**
+  - Autocomplete typeahead returning matching categories, products, and blogs.
+  - Headers: `Cache-Control: public, max-age=60, stale-while-revalidate=300`.
+  - Caching: Redis cache-aside (TTL 600s for `limit=5`).
+  - Error codes:
+    - `400 QUERY_TOO_SHORT`: `q` is missing, empty, or less than 2 characters.
+    - `400 QUERY_INVALID`: `q` exceeds 100 characters or contains no searchable letters/digits after punctuation stripping.
+    - `400 INVALID_FILTER`: `limit` is not an integer between 1 and 10, or unexpected query parameters are passed.
+
+### Internal Endpoints (requires `x-service-key`)
+
+- **`POST /api/v1/search/internal/documents`**
+  - Bulk ingestion of search documents (max 500 documents, max 1MB payload).
+  - Idempotent upsert with stale-event rejection (`source_updated_at`).
+- **`GET /api/v1/search/internal/stats`**
+  - Aggregate statistics on total, active, and per-type document counts.
 
 ## Environment
 
@@ -83,5 +106,4 @@ pnpm test:e2e
 pnpm build
 ```
 
-The contracts dependency is pinned to the `@ecom/contracts@1.1.0` GitHub
-Release tarball so CI and Docker do not depend on a sibling checkout.
+The contracts dependency is packaged from `@ecom/contracts@1.2.0` tarball (`file:..\ecom-contracts\ecom-contracts-1.2.0.tgz`).
