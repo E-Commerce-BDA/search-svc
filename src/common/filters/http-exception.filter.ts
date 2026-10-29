@@ -65,6 +65,8 @@ export class HttpExceptionFilter implements ExceptionFilter {
         errStatus === HttpStatus.BAD_REQUEST
       ) {
         status = HttpStatus.BAD_REQUEST;
+      } else if (isDatabaseUnavailableError(exception)) {
+        status = HttpStatus.SERVICE_UNAVAILABLE;
       }
     }
 
@@ -144,6 +146,12 @@ function normalizeException(
         return {
           code: 'VALIDATION_FAILED',
           message: 'Invalid JSON payload',
+        };
+      }
+      if (isDatabaseUnavailableError(exception)) {
+        return {
+          code: 'SEARCH_UNAVAILABLE',
+          message: 'Search database service is currently unavailable',
         };
       }
     }
@@ -240,4 +248,21 @@ function isHealthPath(request: Request): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function isDatabaseUnavailableError(exception: unknown): boolean {
+  if (!isRecord(exception)) {
+    return false;
+  }
+  const code = typeof exception.code === 'string' ? exception.code : '';
+  const message = typeof exception.message === 'string' ? exception.message : '';
+  const dbCodes = ['ECONNREFUSED', '57P01', '57P02', '57P03', '08006', '08001'];
+  if (dbCodes.includes(code)) {
+    return true;
+  }
+  return (
+    message.includes('Connection terminated') ||
+    message.includes('timeout exceeded when trying to connect') ||
+    message.includes('connect ECONNREFUSED')
+  );
 }

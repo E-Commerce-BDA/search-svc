@@ -191,4 +191,26 @@ describe('HttpExceptionFilter', () => {
       }),
     );
   });
+
+  it('maps PostgreSQL connection errors to 503 SEARCH_UNAVAILABLE', () => {
+    const request = makeRequest({ method: 'GET' });
+    const response = makeResponse();
+
+    const dbError = Object.assign(new Error('connect ECONNREFUSED 127.0.0.1:5433'), {
+      code: 'ECONNREFUSED',
+    });
+
+    filter.catch(dbError, makeHost(request, response));
+
+    expect(response.status).toHaveBeenCalledWith(503);
+    expect(response.json).toHaveBeenCalledWith(
+      expect.objectContaining({
+        error: {
+          code: 'SEARCH_UNAVAILABLE',
+          message: 'Search database service is currently unavailable',
+        },
+        requestId: 'req-test',
+      }),
+    );
+  });
 });
