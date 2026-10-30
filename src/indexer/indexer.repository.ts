@@ -1,5 +1,5 @@
 import { Inject, Injectable, Optional } from '@nestjs/common';
-import type { Pool } from 'pg';
+import type { Pool, PoolClient } from 'pg';
 import type { SearchDocument, SearchStats } from '@ecom/contracts';
 import { getPool } from '../db/pool.js';
 import { PG_POOL } from '../db/db.module.js';
@@ -25,7 +25,7 @@ export class IndexerRepository {
     this.pool = pool ?? getPool();
   }
 
-  async upsert(doc: SearchDocument): Promise<UpsertResult> {
+  async upsert(doc: SearchDocument, client?: PoolClient): Promise<UpsertResult> {
     const query = `
       INSERT INTO search.search_documents (
         id, document_type, title, slug, content, image_url,
@@ -68,13 +68,62 @@ export class IndexerRepository {
       doc.sourceUpdatedAt,
     ];
 
-    const result = await this.pool.query<{ id: string }>(query, values);
+    // A caller that already opened a transaction passes its client so the
+    // upsert joins that transaction instead of taking another connection.
+    const result = client
+      ? await client.query<{ id: string }>(query, values)
+      : await this.pool.query<{ id: string }>(query, values);
 
     if (result.rowCount && result.rowCount > 0) {
       return { status: 'accepted' };
     }
 
     return { status: 'skipped' };
+  }
+
+  /**
+   * Runs `fn` on a dedicated connection inside BEGIN/COMMIT, rolling back on a
+   * throw. Callers pass the client down so the dedupe row and the index write
+   * land in the same transaction.
+   */
+  async withTransaction<T>(fn: (client: PoolClient) => Promise<T>): Promise<T> {
+    const client = await this.pool.connect();
+    try {
+      await client.query('BEGIN');
+      const result = await fn(client);
+      await client.query('COMMIT');
+      return result;
+    } catch (error) {
+      try {
+        await client.query('ROLLBACK');
+      } catch {
+        // A failed rollback means the connection is gone; the original error
+        // is the one worth propagating.
+      }
+      throw error;
+    } finally {
+      client.release();
+    }
+  }
+
+  /**
+   * Claims an event id. Returns false when another delivery already claimed
+   * it, which is the only signal the caller needs to skip the write.
+   */
+  async markProcessed(
+    client: PoolClient,
+    eventId: string,
+    topic: string,
+  ): Promise<boolean> {
+    const result = await client.query<{ event_id: string }>(
+      `INSERT INTO search.processed_events (event_id, topic)
+       VALUES ($1, $2)
+       ON CONFLICT (event_id) DO NOTHING
+       RETURNING event_id`,
+      [eventId, topic],
+    );
+
+    return (result.rowCount ?? 0) > 0;
   }
 
   async stats(): Promise<SearchStats> {

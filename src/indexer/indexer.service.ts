@@ -4,8 +4,18 @@ import type {
   SearchDocument,
   SearchStats,
 } from '@ecom/contracts';
-import { EventMapper } from './event-mapper.js';
+import { interpret, type InterpretResult } from '../events/event-interpreter.js';
 import { IndexerRepository } from './indexer.repository.js';
+
+/**
+ * Everything the consumer can learn from one event. `indexed` and `duplicate`
+ * come from the database, the other two are the interpreter's verdict.
+ */
+export type HandleEventOutcome =
+  | { kind: 'indexed'; status: 'accepted' | 'skipped'; eventId: string }
+  | { kind: 'duplicate'; eventId: string }
+  | Extract<InterpretResult, { kind: 'ignored' }>
+  | Extract<InterpretResult, { kind: 'invalid' }>;
 
 @Injectable()
 export class IndexerService {
@@ -13,16 +23,31 @@ export class IndexerService {
 
   constructor(private readonly repository: IndexerRepository) {}
 
-  async handleEvent(
-    event: unknown,
-  ): Promise<'accepted' | 'skipped' | 'ignored'> {
-    const doc = EventMapper.mapToSearchDocument(event);
-    if (!doc) {
-      return 'ignored';
+  async handleEvent(event: unknown): Promise<HandleEventOutcome> {
+    const interpreted = interpret(event);
+
+    if (interpreted.kind !== 'mapped') {
+      return interpreted;
     }
 
-    const result = await this.repository.upsert(doc);
-    return result.status;
+    const { eventId, topic, doc } = interpreted;
+
+    // One transaction covers both statements: a crash between them must not
+    // leave an id claimed for a document that was never written.
+    return this.repository.withTransaction(async (client) => {
+      const claimed = await this.repository.markProcessed(
+        client,
+        eventId,
+        topic,
+      );
+
+      if (!claimed) {
+        return { kind: 'duplicate', eventId };
+      }
+
+      const { status } = await this.repository.upsert(doc, client);
+      return { kind: 'indexed', status, eventId };
+    });
   }
 
   async ingestMany(
