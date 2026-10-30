@@ -25,6 +25,12 @@ describe('Indexer & Internal API (e2e)', () => {
        WHERE id LIKE '0190a8b0-0000-7000-8000-0000000007%'
           OR id LIKE '507f1f77bcf86cd7994390%'`,
     );
+    // Event ids used by this suite; the dedupe table has no id-prefix overlap
+    // with search_documents, so it needs its own cleanup.
+    await pool.query(
+      `DELETE FROM search.processed_events
+       WHERE event_id LIKE '0190a8b0-0000-7000-8000-0000000009%'`,
+    );
 
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [AppModule],
@@ -45,6 +51,10 @@ describe('Indexer & Internal API (e2e)', () => {
         `DELETE FROM search.search_documents
          WHERE id LIKE '0190a8b0-0000-7000-8000-0000000007%'
             OR id LIKE '507f1f77bcf86cd7994390%'`,
+      );
+      await pool.query(
+        `DELETE FROM search.processed_events
+         WHERE event_id LIKE '0190a8b0-0000-7000-8000-0000000009%'`,
       );
     }
     if (app) {
@@ -351,6 +361,7 @@ describe('Indexer & Internal API (e2e)', () => {
 
       // 2. Consume blog.updated event with status: 'draft' (unpublish)
       const unpublishEvent = {
+        id: '0190a8b0-0000-7000-8000-000000000901',
         topic: 'blog.updated',
         eventType: 'blog.updated',
         producer: 'cms-svc',
@@ -365,7 +376,11 @@ describe('Indexer & Internal API (e2e)', () => {
       };
 
       const result = await eventConsumer.publish(unpublishEvent);
-      expect(result).toBe('accepted');
+      expect(result).toEqual({
+        kind: 'indexed',
+        status: 'accepted',
+        eventId: '0190a8b0-0000-7000-8000-000000000901',
+      });
 
       // 3. Document in database is now inactive
       const after = await pool.query<{ status: string }>(
@@ -399,6 +414,7 @@ describe('Indexer & Internal API (e2e)', () => {
 
       // 2. Consume deactivate event
       const deactivateEvent = {
+        id: '0190a8b0-0000-7000-8000-000000000902',
         topic: 'category.updated',
         eventType: 'category.updated',
         producer: 'catalog-svc',
@@ -413,7 +429,11 @@ describe('Indexer & Internal API (e2e)', () => {
       };
 
       const result = await eventConsumer.publish(deactivateEvent);
-      expect(result).toBe('accepted');
+      expect(result).toEqual({
+        kind: 'indexed',
+        status: 'accepted',
+        eventId: '0190a8b0-0000-7000-8000-000000000902',
+      });
 
       const after = await pool.query<{ status: string }>(
         `SELECT status FROM search.search_documents WHERE id = $1`,
@@ -424,13 +444,136 @@ describe('Indexer & Internal API (e2e)', () => {
 
     it('ignores unknown event topic and returns ignored', async () => {
       const unknownEvent = {
-        topic: 'order.placed',
-        eventType: 'order.placed',
+        id: '0190a8b0-0000-7000-8000-000000000903',
+        type: 'order.placed',
+        producer: 'order-svc',
+        timestamp: '2026-10-28T12:00:00.000Z',
         payload: {},
       };
 
       const result = await eventConsumer.publish(unknownEvent);
-      expect(result).toBe('ignored');
+      expect(result).toEqual({
+        kind: 'ignored',
+        reason: 'unknown-topic',
+        type: 'order.placed',
+      });
+    });
+
+    it('applies an envelope id once and reports the redelivery as duplicate', async () => {
+      const productId = '0190a8b0-0000-7000-8000-0000000007d1';
+      const eventId = '0190a8b0-0000-7000-8000-000000000904';
+
+      const first = {
+        id: eventId,
+        type: 'product.updated',
+        producer: 'catalog-svc',
+        timestamp: '2026-10-30T10:00:00.000Z',
+        payload: {
+          productId,
+          name: 'First Delivery',
+          slug: 'first-delivery',
+          price: 50,
+          status: 'active',
+          updatedAt: '2026-10-30T10:00:00.000Z',
+        },
+      };
+
+      const firstResult = await eventConsumer.publish(first);
+      expect(firstResult).toEqual({
+        kind: 'indexed',
+        status: 'accepted',
+        eventId,
+      });
+
+      // Same event id, newer timestamp, different content: dedupe must win over
+      // the stale-timestamp guard, so the document keeps the first delivery.
+      const redelivered = {
+        ...first,
+        timestamp: '2026-10-30T12:00:00.000Z',
+        payload: {
+          ...first.payload,
+          name: 'Second Delivery',
+          slug: 'second-delivery',
+          updatedAt: '2026-10-30T12:00:00.000Z',
+        },
+      };
+
+      const secondResult = await eventConsumer.publish(redelivered);
+      expect(secondResult).toEqual({ kind: 'duplicate', eventId });
+
+      const row = await pool.query<{ title: string; slug: string }>(
+        `SELECT title, slug FROM search.search_documents
+         WHERE id = $1 AND document_type = 'product'`,
+        [productId],
+      );
+      expect(row.rows[0].title).toBe('First Delivery');
+      expect(row.rows[0].slug).toBe('first-delivery');
+
+      const claimed = await pool.query<{ topic: string }>(
+        `SELECT topic FROM search.processed_events WHERE event_id = $1`,
+        [eventId],
+      );
+      expect(claimed.rows[0].topic).toBe('product.updated');
+    });
+
+    it('rejects a payload that drifts from the contract without writing a document', async () => {
+      const result = await eventConsumer.publish({
+        id: '0190a8b0-0000-7000-8000-000000000905',
+        type: 'product.updated',
+        producer: 'catalog-svc',
+        timestamp: '2026-10-30T10:00:00.000Z',
+        payload: {
+          productId: '0190a8b0-0000-7000-8000-0000000007d2',
+          name: 'Missing Price',
+          slug: 'missing-price',
+          status: 'active',
+          updatedAt: '2026-10-30T10:00:00.000Z',
+        },
+      });
+
+      expect(result.kind).toBe('invalid');
+      expect(result).toMatchObject({ stage: 'payload', topic: 'product.updated' });
+
+      const row = await pool.query(
+        `SELECT id FROM search.search_documents WHERE id = $1`,
+        ['0190a8b0-0000-7000-8000-0000000007d2'],
+      );
+      expect(row.rowCount).toBe(0);
+    });
+  });
+
+  describe('GET /api/v1/search/internal/consumer-stats', () => {
+    it('rejects requests without the service key with SERVICE_KEY_INVALID', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/search/internal/consumer-stats')
+        .expect(401);
+
+      expect(response.body).toMatchObject({
+        error: { code: 'SERVICE_KEY_INVALID' },
+      });
+    });
+
+    it('returns the counters with Cache-Control: no-store', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/api/v1/search/internal/consumer-stats')
+        .set('x-service-key', SERVICE_KEY)
+        .expect(200)
+        .expect('Cache-Control', 'no-store');
+
+      expect(response.body).toEqual({
+        accepted: expect.any(Number),
+        skipped: expect.any(Number),
+        duplicate: expect.any(Number),
+        ignored: expect.any(Number),
+        invalid: expect.any(Number),
+        dlq: expect.any(Number),
+      });
+
+      // The suite consumed events above, so the in-memory path must be counted.
+      expect(response.body.ignored).toBeGreaterThanOrEqual(1);
+      expect(response.body.invalid).toBeGreaterThanOrEqual(1);
+      // Nothing on the in-memory path can reach a DLQ.
+      expect(response.body.dlq).toBe(0);
     });
   });
 });

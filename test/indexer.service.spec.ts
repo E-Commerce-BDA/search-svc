@@ -1,70 +1,118 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest';
+import type { PoolClient } from 'pg';
 import type { SearchDocument } from '@ecom/contracts';
 import { IndexerService } from '../src/indexer/indexer.service.js';
 import type { IndexerRepository } from '../src/indexer/indexer.repository.js';
 
+const PRODUCT_EVENT = {
+  id: '0190a8b0-0000-7000-8000-00000000e101',
+  type: 'product.updated',
+  producer: 'catalog-svc',
+  timestamp: '2026-10-30T10:00:00.000Z',
+  payload: {
+    productId: '0190a8b0-0000-7000-8000-000000000001',
+    name: 'Velocity Road Runner',
+    slug: 'velocity-road-runner',
+    price: 149.99,
+    status: 'active',
+    updatedAt: '2026-10-30T10:00:00.000Z',
+  },
+};
+
 describe('IndexerService', () => {
   let repository: {
     upsert: ReturnType<typeof vi.fn>;
+    withTransaction: ReturnType<typeof vi.fn>;
+    markProcessed: ReturnType<typeof vi.fn>;
     stats: ReturnType<typeof vi.fn>;
   };
   let service: IndexerService;
+  const client = {} as PoolClient;
 
   beforeEach(() => {
     repository = {
       upsert: vi.fn(),
+      // A transaction mock that simply runs the callback on a fake client.
+      withTransaction: vi.fn(
+        async (fn: (c: PoolClient) => Promise<unknown>) => fn(client),
+      ),
+      markProcessed: vi.fn().mockResolvedValue(true),
       stats: vi.fn(),
     };
     service = new IndexerService(repository as unknown as IndexerRepository);
   });
 
   describe('handleEvent', () => {
-    it('returns ignored for unknown topics or malformed envelopes', async () => {
+    it('ignores an unregistered topic without opening a transaction', async () => {
       const result = await service.handleEvent({
-        topic: 'unknown.topic',
-        payload: {},
+        ...PRODUCT_EVENT,
+        id: '0190a8b0-0000-7000-8000-00000000e102',
+        type: 'order.placed',
       });
-      expect(result).toBe('ignored');
+
+      expect(result).toEqual({
+        kind: 'ignored',
+        reason: 'unknown-topic',
+        type: 'order.placed',
+      });
+      expect(repository.withTransaction).not.toHaveBeenCalled();
       expect(repository.upsert).not.toHaveBeenCalled();
     });
 
-    it('maps valid event and calls repository upsert', async () => {
-      repository.upsert.mockResolvedValue({ status: 'accepted' });
-
+    it('returns invalid with the stage when the payload drifts', async () => {
       const result = await service.handleEvent({
-        topic: 'category.updated',
-        payload: {
-          categoryId: '0190a8b0-0000-7000-8000-000000000101',
-          name: 'Road Running',
-          slug: 'road-running',
-          isActive: true,
-        },
+        ...PRODUCT_EVENT,
+        id: '0190a8b0-0000-7000-8000-00000000e103',
+        payload: { productId: '0190a8b0-0000-7000-8000-000000000001' },
       });
 
-      expect(result).toBe('accepted');
-      expect(repository.upsert).toHaveBeenCalledWith(
-        expect.objectContaining({
-          id: '0190a8b0-0000-7000-8000-000000000101',
-          documentType: 'category',
-          title: 'Road Running',
-        }),
-      );
+      expect(result.kind).toBe('invalid');
+      expect(repository.withTransaction).not.toHaveBeenCalled();
     });
 
-    it('returns skipped when upsert stale guard triggers', async () => {
-      repository.upsert.mockResolvedValue({ status: 'skipped' });
+    it('claims the event id and upserts on the same client', async () => {
+      repository.upsert.mockResolvedValue({ status: 'accepted' });
 
-      const result = await service.handleEvent({
-        topic: 'category.updated',
-        payload: {
-          categoryId: '0190a8b0-0000-7000-8000-000000000101',
-          name: 'Old Category',
-          slug: 'old-category',
-          isActive: true,
-        },
+      const result = await service.handleEvent(PRODUCT_EVENT);
+
+      expect(repository.markProcessed).toHaveBeenCalledWith(
+        client,
+        '0190a8b0-0000-7000-8000-00000000e101',
+        'product.updated',
+      );
+      expect(repository.upsert).toHaveBeenCalledWith(
+        expect.objectContaining({
+          id: '0190a8b0-0000-7000-8000-000000000001',
+          documentType: 'product',
+          title: 'Velocity Road Runner',
+        }),
+        client,
+      );
+      expect(result).toEqual({
+        kind: 'indexed',
+        status: 'accepted',
+        eventId: '0190a8b0-0000-7000-8000-00000000e101',
       });
+    });
 
-      expect(result).toBe('skipped');
+    it('reports duplicate and skips the upsert when the id was already claimed', async () => {
+      repository.markProcessed.mockResolvedValue(false);
+
+      const result = await service.handleEvent(PRODUCT_EVENT);
+
+      expect(result).toEqual({
+        kind: 'duplicate',
+        eventId: '0190a8b0-0000-7000-8000-00000000e101',
+      });
+      expect(repository.upsert).not.toHaveBeenCalled();
+    });
+
+    it('propagates a database failure so the consumer can retry', async () => {
+      repository.upsert.mockRejectedValue(new Error('deadlock detected'));
+
+      await expect(service.handleEvent(PRODUCT_EVENT)).rejects.toThrow(
+        'deadlock detected',
+      );
     });
   });
 
@@ -113,6 +161,8 @@ describe('IndexerService', () => {
         skipped: 1,
         rejected: 1,
       });
+      // The HTTP path writes without a client and without claiming an id.
+      expect(repository.upsert).toHaveBeenCalledWith(docA);
     });
 
     it('re-throws critical database connection errors', async () => {
@@ -141,4 +191,3 @@ describe('IndexerService', () => {
     });
   });
 });
-

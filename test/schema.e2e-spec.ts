@@ -343,6 +343,74 @@ describe('Search Schema (e2e)', () => {
     });
   });
 
+  describe('processed_events', () => {
+    it('creates the dedupe table with its columns and primary key', async () => {
+      const columns = await pool.query<ColumnInfo>(
+        `SELECT column_name, data_type, is_generated, generation_expression
+         FROM information_schema.columns
+         WHERE table_schema = 'search' AND table_name = 'processed_events'
+         ORDER BY ordinal_position`,
+      );
+
+      expect(columns.rows.map((row) => row.column_name)).toEqual([
+        'event_id',
+        'topic',
+        'processed_at',
+      ]);
+      expect(columns.rows[0].data_type).toBe('character varying');
+      expect(columns.rows[1].data_type).toBe('character varying');
+      expect(columns.rows[2].data_type).toBe('timestamp with time zone');
+
+      const pk = await pool.query<{ column_name: string }>(
+        `SELECT kcu.column_name
+         FROM information_schema.table_constraints tc
+         JOIN information_schema.key_column_usage kcu
+           ON kcu.constraint_name = tc.constraint_name
+          AND kcu.table_schema = tc.table_schema
+         WHERE tc.table_schema = 'search'
+           AND tc.table_name = 'processed_events'
+           AND tc.constraint_type = 'PRIMARY KEY'`,
+      );
+      expect(pk.rows.map((row) => row.column_name)).toEqual(['event_id']);
+    });
+
+    it('has the retention index the sweep will use', async () => {
+      const indexes = await pool.query<IndexInfo>(
+        `SELECT indexname, indexdef FROM pg_indexes
+         WHERE schemaname = 'search' AND tablename = 'processed_events'`,
+      );
+
+      const names = indexes.rows.map((row) => row.indexname);
+      expect(names).toContain('processed_events_pkey');
+      expect(names).toContain('idx_processed_events_processed_at');
+    });
+
+    it('rejects a second insert of the same event id', async () => {
+      const eventId = '0190a8b0-0000-7000-8000-0000000009ff';
+
+      await pool.query(
+        `INSERT INTO search.processed_events (event_id, topic)
+         VALUES ($1, 'product.updated')
+         ON CONFLICT (event_id) DO NOTHING`,
+        [eventId],
+      );
+      const second = await pool.query(
+        `INSERT INTO search.processed_events (event_id, topic)
+         VALUES ($1, 'product.updated')
+         ON CONFLICT (event_id) DO NOTHING
+         RETURNING event_id`,
+        [eventId],
+      );
+
+      // ON CONFLICT DO NOTHING is the whole dedupe contract: no row, no error.
+      expect(second.rowCount).toBe(0);
+
+      await pool.query(`DELETE FROM search.processed_events WHERE event_id = $1`, [
+        eventId,
+      ]);
+    });
+  });
+
   describe('Seed dataset verification', () => {
     it('has exactly 12 seeded documents with expected type and status distribution', async () => {
       const countsResult = await pool.query<{
