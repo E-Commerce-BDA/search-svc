@@ -6,16 +6,15 @@ import {
   OnModuleInit,
   Optional,
 } from '@nestjs/common';
+import { dlqTopicName, isEventTopic } from '@ecom/contracts';
 import { Kafka, Consumer, Producer, Partitioners } from 'kafkajs';
-import { IndexerService } from '../indexer/indexer.service.js';
+import {
+  IndexerService,
+  type HandleEventOutcome,
+} from '../indexer/indexer.service.js';
+import { ConsumerMetrics, recordEventOutcome } from './consumer-metrics.js';
 import type { IEventConsumer } from './event-consumer.interface.js';
-
-export const SEARCH_KAFKA_TOPICS = [
-  'product.updated',
-  'category.updated',
-  'blog.updated',
-  'product.imported',
-];
+import { SEARCH_KAFKA_TOPICS } from './search-topics.js';
 
 export interface KafkaConsumerOptions {
   brokers?: string[];
@@ -23,6 +22,22 @@ export interface KafkaConsumerOptions {
   groupId?: string;
   retryDelaysMs?: number[];
   maxRetries?: number;
+}
+
+/** Why a record left the main topic. Kept as an enum-like union so the DLQ is queryable. */
+type DlqReason =
+  | 'invalid-json'
+  | 'invalid-envelope'
+  | 'invalid-payload'
+  | 'transient-exhausted';
+
+interface DlqRecord {
+  reason: DlqReason;
+  error: string;
+  /** Present for `invalid-json`, where there is no parsed envelope to keep. */
+  rawValue?: string;
+  /** Present when the body parsed but was rejected or failed downstream. */
+  originalPayload?: unknown;
 }
 
 @Injectable()
@@ -33,6 +48,7 @@ export class KafkaEventConsumer
   private readonly kafka: Kafka;
   private readonly consumer: Consumer;
   private readonly producer: Producer;
+  private readonly metrics: ConsumerMetrics;
   private isRunning = false;
   private connectRetryTimer: NodeJS.Timeout | null = null;
   private readonly retryDelaysMs: number[];
@@ -43,7 +59,9 @@ export class KafkaEventConsumer
     @Optional()
     @Inject('KAFKA_CONSUMER_OPTIONS')
     options?: KafkaConsumerOptions,
+    @Optional() metrics?: ConsumerMetrics,
   ) {
+    this.metrics = metrics ?? new ConsumerMetrics();
     const rawBrokers =
       options?.brokers ??
       (process.env.KAFKA_BROKERS ?? 'localhost:9092')
@@ -151,8 +169,11 @@ export class KafkaEventConsumer
   }
 
   /**
-   * Processes a single incoming Kafka message with retry and DLQ routing.
-   * Public for testing.
+   * Processes a single incoming Kafka message.
+   *
+   * Public for testing. Every branch commits the offset — a record that can
+   * never succeed must not become a head-of-line block for its partition — and
+   * the offset is committed only after any DLQ write has succeeded.
    */
   async processMessage(
     topic: string,
@@ -165,27 +186,51 @@ export class KafkaEventConsumer
   ): Promise<void> {
     const rawString = message.value?.toString() ?? '';
     const nextOffset = (BigInt(message.offset) + 1n).toString();
+    const commit = async (): Promise<void> => {
+      await this.consumer.commitOffsets([
+        { topic, partition, offset: nextOffset },
+      ]);
+    };
 
     let envelope: unknown;
     try {
       envelope = JSON.parse(rawString);
-    } catch {
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : String(error);
       this.logger.warn(
-        `Malformed non-JSON message received on ${topic} at offset ${message.offset}; committing offset to prevent head-of-line blocking`,
+        `Malformed JSON on ${topic} at offset ${message.offset}: ${reason}. Routing to the DLQ`,
       );
-      await this.consumer.commitOffsets([
-        { topic, partition, offset: nextOffset },
-      ]);
+      await this.sendToDlq(topic, partition, message, {
+        reason: 'invalid-json',
+        error: reason,
+        rawValue: rawString,
+      });
+      this.metrics.record('invalid');
+      await commit();
       return;
     }
 
     let attempt = 0;
     while (attempt <= this.maxRetries) {
       try {
-        await this.indexerService.handleEvent(envelope);
-        await this.consumer.commitOffsets([
-          { topic, partition, offset: nextOffset },
-        ]);
+        const outcome = await this.indexerService.handleEvent(envelope);
+
+        // Side effects first, counters second: a DLQ write that fails leaves
+        // the record un-counted and the retry ladder takes over.
+        if (outcome.kind === 'invalid') {
+          await this.sendToDlq(topic, partition, message, {
+            reason:
+              outcome.stage === 'envelope'
+                ? 'invalid-envelope'
+                : 'invalid-payload',
+            error: outcome.error,
+            originalPayload: envelope,
+          });
+        }
+
+        recordEventOutcome(this.metrics, outcome);
+        this.logOutcome(topic, message.offset, outcome);
+        await commit();
         return;
       } catch (err) {
         if (attempt < this.maxRetries) {
@@ -198,35 +243,78 @@ export class KafkaEventConsumer
           await this.sleep(delay);
           attempt++;
         } else {
-          // Exhausted retries -> publish to DLQ
-          const dlqTopic = `${topic}.dlq`;
           this.logger.error(
-            `Exhausted retries on ${topic} offset ${message.offset}. Routing to ${dlqTopic}`,
+            `Exhausted retries on ${topic} offset ${message.offset}. Routing to the DLQ`,
             err instanceof Error ? err.stack : String(err),
           );
 
           // If DLQ publish fails, error bubbles up and offset is NOT committed
-          await this.producer.send({
-            topic: dlqTopic,
-            messages: [
-              {
-                key: message.key ? message.key.toString() : null,
-                value: JSON.stringify({
-                  originalPayload: envelope,
-                  failedAt: new Date().toISOString(),
-                  error: err instanceof Error ? err.message : String(err),
-                }),
-              },
-            ],
+          await this.sendToDlq(topic, partition, message, {
+            reason: 'transient-exhausted',
+            error: err instanceof Error ? err.message : String(err),
+            originalPayload: envelope,
           });
 
           // Offset committed ONLY after successful DLQ publish
-          await this.consumer.commitOffsets([
-            { topic, partition, offset: nextOffset },
-          ]);
+          await commit();
           return;
         }
       }
+    }
+  }
+
+  /**
+   * A DLQ name comes from the registry when the topic is registered there, so
+   * the producer of the twin topic and this consumer cannot disagree.
+   */
+  private dlqTopicFor(topic: string): string {
+    return isEventTopic(topic) ? dlqTopicName(topic) : `${topic}.dlq`;
+  }
+
+  private async sendToDlq(
+    topic: string,
+    partition: number,
+    message: { key?: Buffer | string | null; offset: string },
+    record: DlqRecord,
+  ): Promise<void> {
+    await this.producer.send({
+      topic: this.dlqTopicFor(topic),
+      messages: [
+        {
+          key: message.key ? message.key.toString() : null,
+          value: JSON.stringify({
+            source: { topic, partition, offset: message.offset },
+            failedAt: new Date().toISOString(),
+            ...record,
+          }),
+        },
+      ],
+    });
+
+    this.metrics.record('dlq');
+  }
+
+  private logOutcome(
+    topic: string,
+    offset: string,
+    outcome: HandleEventOutcome,
+  ): void {
+    switch (outcome.kind) {
+      case 'indexed':
+        return;
+      case 'duplicate':
+        this.logger.debug(
+          `Event ${outcome.eventId} on ${topic} offset ${offset} was already applied; skipped`,
+        );
+        return;
+      case 'ignored':
+        this.logger.warn(
+          `Ignored ${outcome.type ?? 'event'} on ${topic} offset ${offset} (${outcome.reason})`,
+        );
+        return;
+      case 'invalid':
+        // Already routed to the DLQ by the caller.
+        return;
     }
   }
 
