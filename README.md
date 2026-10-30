@@ -36,12 +36,18 @@ To apply the schema and seed dataset manually via `psql`:
 # Development database
 psql -h localhost -p 5433 -U ecom -d ecom -f db/001-search-schema.sql
 psql -h localhost -p 5433 -U ecom -d ecom -f db/002-seed-search.sql
+psql -h localhost -p 5433 -U ecom -d ecom -f db/003-processed-events.sql
 
 # E2E test database
 psql -h localhost -p 5433 -U ecom -d postgres -c "CREATE DATABASE ecom_search_test;"
 psql -h localhost -p 5433 -U ecom -d ecom_search_test -f db/001-search-schema.sql
 psql -h localhost -p 5433 -U ecom -d ecom_search_test -f db/002-seed-search.sql
+psql -h localhost -p 5433 -U ecom -d ecom_search_test -f db/003-processed-events.sql
 ```
+
+`003` creates `search.processed_events`, the consumer's dedupe table. Running
+without it makes `handleEvent` fail on the first mapped event with
+`relation "search.processed_events" does not exist`.
 
 ## API Endpoints
 
@@ -75,6 +81,28 @@ psql -h localhost -p 5433 -U ecom -d ecom_search_test -f db/002-seed-search.sql
   - Idempotent upsert with stale-event rejection (`source_updated_at`).
 - **`GET /api/v1/search/internal/stats`**
   - Aggregate statistics on total, active, and per-type document counts.
+- **`GET /api/v1/search/internal/consumer-stats`**
+  - Per-outcome event counters: `accepted`, `skipped`, `duplicate`, `ignored`,
+    `invalid`, `dlq`. Process-local, reset on boot.
+
+## Event Consumption
+
+Subscribed topics: `product.updated`, `category.updated`, `blog.updated`,
+`product.imported` (group `search-svc`, manual commits).
+
+Each record is classified against `@ecom/contracts` before any database work:
+
+| Record | Action |
+| --- | --- |
+| Not JSON | `<topic>.dlq`, `reason: invalid-json`, committed |
+| Bad envelope / bad payload | `<topic>.dlq`, `reason: invalid-envelope`/`invalid-payload`, committed, no retry |
+| Unknown or unsubscribed type | counted as `ignored`, committed, warning |
+| Valid, new event id | `search_documents` upsert + `processed_events` claim in one transaction |
+| Valid, seen event id | counted as `duplicate`, committed, no write |
+| Infrastructure error | 5 attempts (1/2/4/8/16s), then `<topic>.dlq` (`transient-exhausted`); the offset is committed only after the DLQ write succeeds |
+
+Dedupe lives in `search.processed_events` (`db/003-processed-events.sql`), so a
+redelivery is a no-op even when its payload looks newer than the stored row.
 
 ## Environment
 
